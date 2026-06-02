@@ -1,27 +1,29 @@
 const express = require("express");
 const app = express();
-const axios = require("axios");
 const os = require('os');
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { promisify } = require('util');
+const { spawn } = require('child_process');
 const exec = promisify(require('child_process').exec);
 
 // ================= 核心配置项 =================
-const FILE_PATH = process.env.FILE_PATH || '.tmp';       // 运行目录
-const SUB_PATH = process.env.SUB_PATH || 'sub';          // 订阅路径 (访问 /sub 获取节点)
-const PORT = process.env.SERVER_PORT || process.env.PORT || 3000; // http服务端口
+const FILE_PATH = process.env.FILE_PATH || '.tmp';
+// 【安全修复】如果未设置订阅路径，生成32位随机安全字符串防止全网扫描器白嫖
+const SUB_PATH = process.env.SUB_PATH || crypto.randomBytes(16).toString('hex');
+// 【安全修复】强制转换端口为数字，防止环境变量注入攻击
+const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || 3000, 10);
+const ARGO_PORT = parseInt(process.env.ARGO_PORT || 8001, 10);
 const UUID = process.env.UUID || '448ecbf7-b396-4df5-86c1-5139589b668f'; 
-const ARGO_DOMAIN = process.env.ARGO_DOMAIN || '';       // 固定隧道域名,留空即启用临时隧道
-const ARGO_AUTH = process.env.ARGO_AUTH || '';           // 固定隧道密钥json或token
-const ARGO_PORT = process.env.ARGO_PORT || 8001;         // 本地隧道代理端口
-const CFIP = process.env.CFIP || 'www.visa.com.sg';      // 节点优选域名或优选ip  
-const CFPORT = process.env.CFPORT || 443;                // 优选端口
-const NAME = process.env.NAME || 'SafeNode';             // 节点基础名称
+const ARGO_DOMAIN = process.env.ARGO_DOMAIN || '';
+const ARGO_AUTH = process.env.ARGO_AUTH || '';
+const CFIP = process.env.CFIP || 'www.visa.com.sg';
+const CFPORT = process.env.CFPORT || 443;
+const NAME = process.env.NAME || 'SafeNode';
 
-// 取消随机进程名，使用固定名称方便系统进程排查
-const webPath = path.join(FILE_PATH, 'web'); // Xray 内核
-const botPath = path.join(FILE_PATH, 'bot'); // Cloudflared
+const webPath = path.join(FILE_PATH, 'web');
+const botPath = path.join(FILE_PATH, 'bot');
 const subPath = path.join(FILE_PATH, 'sub.txt');
 const bootLogPath = path.join(FILE_PATH, 'boot.log');
 
@@ -29,6 +31,15 @@ const bootLogPath = path.join(FILE_PATH, 'boot.log');
 if (!fs.existsSync(FILE_PATH)) {
   fs.mkdirSync(FILE_PATH);
   console.log(`${FILE_PATH} created`);
+}
+
+// 【安全修复】启动后台进程的安全函数 (取代容易产生注入的 exec + nohup)
+function spawnProcess(command, args) {
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore'
+  });
+  child.unref();
 }
 
 // 生成 Xray 配置文件
@@ -43,7 +54,28 @@ async function generateConfig() {
       { port: 3004, listen: "127.0.0.1", protocol: "trojan", settings: { clients: [{ password: UUID }] }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/trojan-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
     ],
     dns: { servers: ["https+local://8.8.8.8/dns-query"] },
-    outbounds: [ { protocol: "freedom", tag: "direct" }, {protocol: "blackhole", tag: "block"} ]
+    outbounds: [ 
+      { protocol: "freedom", tag: "direct" }, 
+      { protocol: "blackhole", tag: "block" } 
+    ],
+    // 【安全修复】添加 SSRF 防护路由，屏蔽所有局域网/云元数据 IP 的代理请求
+    routing: {
+      domainStrategy: "IPIfNonMatch",
+      rules: [
+        {
+          type: "field",
+          ip: [
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "fc00::/7",
+            "fe80::/10"
+          ],
+          outboundTag: "block"
+        }
+      ]
+    }
   };
   fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config, null, 2));
 }
@@ -52,32 +84,28 @@ async function generateConfig() {
 async function downloadOfficialBinaries() {
   const arch = os.arch();
   const isArm = (arch === 'arm' || arch === 'arm64' || arch === 'aarch64');
-  
   const xrayArch = isArm ? 'arm64-v8a' : '64';
   const cfArch = isArm ? 'arm64' : 'amd64';
 
-  // 下载 Cloudflared (官方源)
   if (!fs.existsSync(botPath)) {
     console.log("Downloading official Cloudflared...");
     try {
       await exec(`wget -qO ${botPath} https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cfArch}`);
       await exec(`chmod 775 ${botPath}`);
     } catch (e) {
-      console.error("Cloudflared download failed. Ensure wget is installed.", e.message);
+      console.error("Cloudflared download failed.", e.message);
     }
   }
 
-  // 下载 Xray (官方源，需依赖 unzip)
   if (!fs.existsSync(webPath)) {
     console.log("Downloading official Xray-core...");
     try {
       await exec(`wget -qO- https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip | unzip -qd ${FILE_PATH} -`);
       await exec(`mv ${FILE_PATH}/xray ${webPath}`);
       await exec(`chmod 775 ${webPath}`);
-      // 清理残留的解压文件
       await exec(`rm -f ${FILE_PATH}/geoip.dat ${FILE_PATH}/geosite.dat ${FILE_PATH}/LICENSE ${FILE_PATH}/README.md`);
     } catch (e) {
-      console.error("Xray download failed. Ensure wget and unzip are installed.", e.message);
+      console.error("Xray download failed.", e.message);
     }
   }
 }
@@ -85,9 +113,14 @@ async function downloadOfficialBinaries() {
 // 配置固定隧道 Json
 function setupArgoConfig() {
   if (ARGO_AUTH.includes('TunnelSecret')) {
-    fs.writeFileSync(path.join(FILE_PATH, 'tunnel.json'), ARGO_AUTH);
-    const tunnelYaml = `
-tunnel: ${ARGO_AUTH.split('"')[11]}
+    try {
+      // 【安全修复】标准的 JSON 解析，避免切片越界导致的程序崩溃
+      const authData = JSON.parse(ARGO_AUTH);
+      const secret = authData.TunnelSecret;
+      
+      fs.writeFileSync(path.join(FILE_PATH, 'tunnel.json'), ARGO_AUTH);
+      const tunnelYaml = `
+tunnel: ${secret}
 credentials-file: ${path.join(FILE_PATH, 'tunnel.json')}
 protocol: http2
 
@@ -98,14 +131,16 @@ ingress:
       noTLSVerify: true
   - service: http_status:404
 `;
-    fs.writeFileSync(path.join(FILE_PATH, 'tunnel.yml'), tunnelYaml);
+      fs.writeFileSync(path.join(FILE_PATH, 'tunnel.yml'), tunnelYaml);
+    } catch (err) {
+      console.error("Failed to parse ARGO_AUTH JSON:", err.message);
+    }
   }
 }
 
 // 提取临时域名并生成节点信息
 async function extractDomains() {
   let argoDomain = ARGO_DOMAIN;
-
   if (!argoDomain) {
     try {
       const fileContent = fs.readFileSync(bootLogPath, 'utf-8');
@@ -117,36 +152,21 @@ async function extractDomains() {
           break;
         }
       }
-    } catch (error) {
-      console.error('Error reading boot.log for temp domain.', error.message);
-    }
+    } catch (error) {}
   }
 
   if (argoDomain) {
     console.log('ArgoDomain successfully fetched:', argoDomain);
     await generateLinks(argoDomain);
   } else {
-    console.log('ArgoDomain not found yet, will check again later...');
+    setTimeout(extractDomains, 5000);
   }
-}
-
-// 获取公网 ISP 信息
-async function getMetaInfo() {
-  try {
-    const response = await axios.get('https://api.ip.sb/geoip', { headers: { 'User-Agent': 'Mozilla/5.0', timeout: 3000 }});
-    if (response.data && response.data.country_code && response.data.isp) {
-      return `${response.data.country_code}-${response.data.isp}`.replace(/\s+/g, '_');
-    }
-  } catch (error) {
-    // 静默忽略
-  }
-  return 'Unknown_ISP';
 }
 
 // 生成节点链接
 async function generateLinks(argoDomain) {
-  const ISP = await getMetaInfo();
-  const nodeName = `${NAME}-${ISP}`;
+  // 【隐私修复】废弃通过 api.ip.sb 获取公网 IP (防止被第三方 API 记录跟踪)
+  const nodeName = `${NAME}-Node`;
   
   const VMESS = { v: '2', ps: `${nodeName}`, add: CFIP, port: CFPORT, id: UUID, aid: '0', scy: 'auto', net: 'ws', type: 'none', host: argoDomain, path: '/vmess-argo?ed=2560', tls: 'tls', sni: argoDomain, alpn: '', fp: 'firefox'};
   
@@ -160,9 +180,14 @@ trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${argoDomain}&fp=firefox&typ
 
   const encodedSub = Buffer.from(subTxt).toString('base64');
   fs.writeFileSync(subPath, encodedSub);
-  console.log(`Subscription Base64 Generated. Access via http://<your-ip>:${PORT}/${SUB_PATH}`);
   
-  // 仅在本地内存中托管订阅路由，不再向外发送
+  // 在控制台打印生成的安全订阅路径
+  console.log(`====================================================`);
+  console.log(`[WARNING] Your Subscription path is securely set to:`);
+  console.log(`http://<your-ip>:${PORT}/${SUB_PATH}`);
+  console.log(`====================================================`);
+  
+  // 订阅接口路由
   app.get(`/${SUB_PATH}`, (req, res) => {
     res.set('Content-Type', 'text/plain; charset=utf-8');
     res.send(encodedSub);
@@ -178,24 +203,23 @@ async function startServer() {
 
     // 启动 Xray
     if (fs.existsSync(webPath)) {
-      await exec(`nohup ${webPath} -c ${FILE_PATH}/config.json >/dev/null 2>&1 &`);
+      spawnProcess(webPath, ['-c', path.join(FILE_PATH, 'config.json')]);
       console.log('Xray core is running');
     }
 
-    // 启动 Cloudflared
+    // 启动 Cloudflared (使用安全的数组参数防止命令注入)
     if (fs.existsSync(botPath)) {
-      let args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 --logfile ${bootLogPath} --loglevel info --url http://localhost:${ARGO_PORT}`;
-      
+      let args = [];
       if (ARGO_AUTH.match(/^[A-Z0-9a-z=]{120,250}$/)) {
-        args = `tunnel --edge-ip-version auto --no-autoupdate --protocol http2 run --token ${ARGO_AUTH}`;
-      } else if (ARGO_AUTH.match(/TunnelSecret/)) {
-        args = `tunnel --edge-ip-version auto --config ${FILE_PATH}/tunnel.yml run`;
+        args = ['tunnel', '--edge-ip-version', 'auto', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', ARGO_AUTH];
+      } else if (ARGO_AUTH.includes('TunnelSecret')) {
+        args = ['tunnel', '--edge-ip-version', 'auto', '--config', path.join(FILE_PATH, 'tunnel.yml'), 'run'];
+      } else {
+        args = ['tunnel', '--edge-ip-version', 'auto', '--no-autoupdate', '--protocol', 'http2', '--logfile', bootLogPath, '--loglevel', 'info', '--url', `http://localhost:${ARGO_PORT}`];
       }
-
-      await exec(`nohup ${botPath} ${args} >/dev/null 2>&1 &`);
-      console.log('Cloudflared tunnel is running');
       
-      // 等待日志生成后提取域名
+      spawnProcess(botPath, args);
+      console.log('Cloudflared tunnel is running');
       setTimeout(extractDomains, 5000);
     }
   } catch (error) {
@@ -205,9 +229,18 @@ async function startServer() {
 
 startServer();
 
-// 网页根路由
+// ================= 路由逻辑 =================
+
+// 【完美伪装修复】根路由读取并返回 index.html 伪装成正规SaaS站点，躲避审查和扫描器
 app.get("/", (req, res) => {
-  res.send(`Service is running safely. <br><br>Access /${SUB_PATH} to get your subscription list.`);
+  const htmlPath = path.join(__dirname, 'index.html');
+  if (fs.existsSync(htmlPath)) {
+    res.sendFile(htmlPath);
+  } else {
+    // 降级处理，如果没找到 index.html
+    res.send("Welcome to CodeFlow API Server.");
+  }
 });
 
+// 监听端口
 app.listen(PORT, () => console.log(`HTTP server listening on port ${PORT}`));
