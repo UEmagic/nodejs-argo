@@ -11,13 +11,13 @@ const exec = promisify(require('child_process').exec);
 // ================= 核心配置项 =================
 const FILE_PATH = process.env.FILE_PATH || '.tmp';
 // 【安全修复】如果未设置订阅路径，生成32位随机安全字符串防止全网扫描器白嫖
-const SUB_PATH = process.env.SUB_PATH || crypto.randomBytes(16).toString('hex');
+const SUB_PATH = process.env.SUB_PATH || 'my-mac-sub-1984';
 // 【安全修复】强制转换端口为数字，防止环境变量注入攻击
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || 3000, 10);
 const ARGO_PORT = parseInt(process.env.ARGO_PORT || 8001, 10);
 const UUID = process.env.UUID || '448ecbf7-b396-4df5-86c1-5139589b668f'; 
-const ARGO_DOMAIN = process.env.ARGO_DOMAIN || '';
-const ARGO_AUTH = process.env.ARGO_AUTH || '';
+const ARGO_DOMAIN = process.env.ARGO_DOMAIN || 'uesd.uemagic.dpdns.org';
+const ARGO_AUTH = process.env.ARGO_AUTH || 'eyJhIjoiMDM1NWQ1Yzk0MDUzYzVjMmQ4YjgwNWYwNGY5NjYzM2MiLCJ0IjoiMWM3ZjQyMTEtZmRlZS00OGZhLWE2ODItZDJlNGRjZGI3ZGI3IiwicyI6IlpUVTRNemRoTURrdFlqbGpaQzAwTm1NeExUazJOVEl0WkRNNE9HUXpORGd3TURNMyJ9';
 const CFIP = process.env.CFIP || 'www.visa.com.sg';
 const CFPORT = process.env.CFPORT || 443;
 const NAME = process.env.NAME || 'SafeNode';
