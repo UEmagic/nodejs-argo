@@ -1,4 +1,4 @@
-FROM node:alpine3.22
+FROM node:20-slim
 
 WORKDIR /tmp
 
@@ -6,10 +6,9 @@ COPY index.js index.html package.json ./
 
 EXPOSE 3000/tcp
 
-# 【安全修复】补充了 Xray 安装必备的 unzip 包，以及用于安全下载的 ca-certificates 证书包
-RUN apk update && apk upgrade &&\
-    apk add --no-cache openssl curl gcompat iproute2 coreutils unzip ca-certificates &&\
-    apk add --no-cache bash &&\
+# 换用标准 Debian 系统的包管理器 apt-get 安装必需环境
+RUN apt-get update && apt-get upgrade -y &&\
+    apt-get install -y --no-install-recommends openssl curl iproute2 coreutils unzip ca-certificates wget bash &&\
     chmod +x index.js &&\
     npm install
 
