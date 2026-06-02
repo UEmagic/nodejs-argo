@@ -33,7 +33,6 @@ if (!fs.existsSync(FILE_PATH)) {
   console.log(`${FILE_PATH} created`);
 }
 
-// 【修复 1】全面开启日志输出！如果出错，在 DCDEPLOY 的 LOGS 里一目了然
 function spawnProcess(command, args, name) {
   const child = spawn(command, args);
   child.stdout.on('data', (data) => console.log(`[${name}] ${data.toString().trim()}`));
@@ -46,7 +45,6 @@ async function generateConfig() {
   const config = {
     log: { access: '/dev/null', error: '/dev/null', loglevel: 'warning' },
     inbounds: [
-      // 【修复 2】回落目标改为动态 PORT，防止平台内部端口不是 3000 导致连接拒绝
       { port: ARGO_PORT, protocol: 'vless', settings: { clients: [{ id: UUID }], decryption: 'none', fallbacks: [{ dest: PORT }, { path: "/vless-argo", dest: 3002 }, { path: "/vmess-argo", dest: 3003 }, { path: "/trojan-argo", dest: 3004 }] }, streamSettings: { network: 'tcp' } },
       { port: 3001, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID }], decryption: "none" }, streamSettings: { network: "tcp", security: "none" } },
       { port: 3002, listen: "127.0.0.1", protocol: "vless", settings: { clients: [{ id: UUID, level: 0 }], decryption: "none" }, streamSettings: { network: "ws", security: "none", wsSettings: { path: "/vless-argo" } }, sniffing: { enabled: true, destOverride: ["http", "tls", "quic"], metadataOnly: false } },
@@ -65,27 +63,28 @@ async function generateConfig() {
   fs.writeFileSync(path.join(FILE_PATH, 'config.json'), JSON.stringify(config, null, 2));
 }
 
-// 【修复 3】加入 ghproxy 加速节点，防止 DCDEPLOY 被 Github 限速导致下载失败
+// 【彻底修复】去掉干扰的代理，直接连 GitHub 官方，并加入失败清理机制
 async function downloadOfficialBinaries() {
   const arch = os.arch();
   const isArm = (arch === 'arm' || arch === 'arm64' || arch === 'aarch64');
   const xrayArch = isArm ? 'arm64-v8a' : '64';
   const cfArch = isArm ? 'arm64' : 'amd64';
 
-  if (!fs.existsSync(botPath)) {
+  if (!fs.existsSync(botPath) || fs.statSync(botPath).size === 0) {
     try {
-      console.log("Downloading Cloudflared...");
-      await exec(`wget -qO ${botPath} https://ghproxy.net/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cfArch}`);
+      console.log("Downloading Cloudflared (Direct from GitHub)...");
+      await exec(`wget -qO ${botPath} https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cfArch}`);
       await exec(`chmod 775 ${botPath}`);
     } catch (e) {
       console.error("Cloudflared download error:", e.message);
+      await exec(`rm -f ${botPath}`); // 下载失败则清理废弃的空文件
     }
   }
 
-  if (!fs.existsSync(webPath)) {
+  if (!fs.existsSync(webPath) || fs.statSync(webPath).size === 0) {
     try {
-      console.log("Downloading Xray...");
-      await exec(`wget -qO ${FILE_PATH}/xray.zip https://ghproxy.net/https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`);
+      console.log("Downloading Xray (Direct from GitHub)...");
+      await exec(`wget -qO ${FILE_PATH}/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${xrayArch}.zip`);
       await exec(`unzip -qo ${FILE_PATH}/xray.zip -d ${FILE_PATH}`);
       await exec(`mv ${FILE_PATH}/xray ${webPath}`);
       await exec(`chmod 775 ${webPath}`);
@@ -93,6 +92,7 @@ async function downloadOfficialBinaries() {
       console.log("Xray setup completed.");
     } catch (e) {
       console.error("Xray download/unzip error:", e.message);
+      await exec(`rm -f ${FILE_PATH}/xray.zip ${webPath}`);
     }
   }
 }
